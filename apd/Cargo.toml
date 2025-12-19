@@ -6,11 +6,18 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+mlua = { version = "0.11.5", features = ["lua54","vendored"] }
 anyhow = "1"
 csv = "1.3.1"
 clap = { version = "4", features = ["derive"] }
 const_format = "0.2"
-zip = { version = "4.3.0", default-features = false }
+zip = { version = "5.1.1",features = [
+    "deflate",
+    "deflate64",
+    "time",
+    "lzma",
+    "xz",
+], default-features = false }
 zip-extensions = { git = "https://github.com/AndroidPatch/zip-extensions-rs.git", branch = "master", features = [
     "deflate",
     "lzma",
@@ -32,8 +39,9 @@ nom = "8"
 derive-new = "0.7.0"
 which = "8"
 getopts = "0.2"
-errno = "0.3.11"
+errno = "0.3.14"
 notify = "8.2"
+signal-hook = "0.3"
 
 [target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
 rustix = { git = "https://github.com/AndroidPatch/rustix", branch = "main", features = ["all-apis"] }
@@ -47,7 +55,8 @@ android_logger = { version = "0.15", default-features = false }
 
 [profile.release]
 strip = true
+overflow-checks = false
 opt-level = 3
 codegen-units = 1
 panic = "abort"
-lto = true
+lto = "fat"

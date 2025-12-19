@@ -9,16 +9,16 @@ plugins {
     alias(libs.plugins.kotlin.compose.compiler) apply false
 }
 
-project.ext.set("kernelPatchVersion", "0.12.0")
+project.ext.set("kernelPatchVersion", "0.12.5")
 
 val androidMinSdkVersion = 26
-val androidTargetSdkVersion = 35
-val androidCompileSdkVersion = 35
-
-val androidCompileNdkVersion = "28.1.13356709"
+val androidTargetSdkVersion = 36
+val androidCompileSdkVersion = 36
+val androidBuildToolsVersion = "36.1.0"
+val androidCompileNdkVersion = "29.0.14206865"
 val managerVersionCode by extra(getVersionCode())
 val managerVersionName by extra(getVersionName())
-
+val branchName by extra(getBranch())
 fun Project.exec(command: String) = providers.exec {
     commandLine(command.split(" "))
 }.standardOutput.asText.get().trim()
@@ -28,13 +28,17 @@ fun getGitCommitCount(): Int {
 }
 
 fun getGitDescribe(): String {
-    return exec("git describe --tags --always").trim()
+    return exec("git rev-parse --verify --short HEAD").trim()
 }
 
 fun getVersionCode(): Int {
     val commitCount = getGitCommitCount()
     val major = 1
     return major * 10000 + commitCount + 200
+}
+
+fun getBranch(): String {
+    return exec("git rev-parse --abbrev-ref HEAD").trim()
 }
 
 fun getVersionName(): String {
@@ -52,7 +56,7 @@ subprojects {
     plugins.withType(AndroidBasePlugin::class.java) {
         extensions.configure(CommonExtension::class.java) {
             compileSdk = androidCompileSdkVersion
-            buildToolsVersion = "36.0.0"
+            buildToolsVersion = androidBuildToolsVersion
             ndkVersion = androidCompileNdkVersion
 
             defaultConfig {

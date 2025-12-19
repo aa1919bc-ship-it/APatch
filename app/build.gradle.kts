@@ -1,8 +1,7 @@
 @file:Suppress("UnstableApiUsage")
 
-import com.android.build.gradle.internal.api.BaseVariantOutputImpl
 import com.android.build.gradle.tasks.PackageAndroidArtifact
-import org.jetbrains.kotlin.compose.compiler.gradle.ComposeFeatureFlag
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.net.URI
 
 plugins {
@@ -18,6 +17,7 @@ plugins {
 
 val managerVersionCode: Int by rootProject.extra
 val managerVersionName: String by rootProject.extra
+val branchName: String by rootProject.extra
 val kernelPatchVersion: String by rootProject.extra
 
 apksign {
@@ -69,16 +69,13 @@ android {
 
     defaultConfig {
         buildConfigField("String", "buildKPV", "\"$kernelPatchVersion\"")
+
+        base.archivesName = "APatch_${managerVersionCode}_${managerVersionName}_${branchName}"
     }
 
-    java {
-        toolchain {
-            languageVersion = JavaLanguageVersion.of(JavaVersion.VERSION_22.majorVersion)
-        }
-    }
-
-    kotlin {
-        jvmToolchain(JavaVersion.VERSION_22.majorVersion.toInt())
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     packaging {
@@ -105,16 +102,24 @@ android {
     sourceSets["main"].jniLibs.srcDir("libs")
 
     applicationVariants.all {
-        outputs.forEach {
-            val output = it as BaseVariantOutputImpl
-            output.outputFileName = "APatch_${managerVersionName}_${managerVersionCode}-$name.apk"
-        }
-
         kotlin.sourceSets {
             getByName(name) {
                 kotlin.srcDir("build/generated/ksp/$name/kotlin")
             }
         }
+    }
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+kotlin {
+    jvmToolchain(21)
+    compilerOptions {
+        jvmTarget = JvmTarget.JVM_21
     }
 }
 
@@ -273,7 +278,6 @@ dependencies {
 
     implementation(libs.markdown)
 
-    implementation(libs.timber)
     implementation(libs.ini4j)
 
     compileOnly(libs.cxx)

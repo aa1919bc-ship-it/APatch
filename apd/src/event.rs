@@ -9,10 +9,13 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use extattr::{Flags as XattrFlags, lgetxattr, lsetxattr};
+use libc::SIGPWR;
 use log::{info, warn};
 use notify::event::{ModifyKind, RenameMode};
 use notify::{Config, Event, EventKind, INotifyWatcher, RecursiveMode, Watcher};
 use rustix::mount::*;
+use signal_hook::consts::signal::*;
+use signal_hook::iterator::Signals;
 use std::ffi::CStr;
 use std::fs::{remove_dir_all, rename};
 use std::os::unix::fs::PermissionsExt;
@@ -239,16 +242,19 @@ pub fn move_file(module_update_dir: &str, module_dir: &str) -> Result<()> {
         if entry.path().is_dir() {
             let source_path = Path::new(module_update_dir).join(file_name_str.as_ref());
             let target_path = Path::new(module_dir).join(file_name_str.as_ref());
-            if target_path.exists() {
-                info!(
-                    "Removing existing folder in target directory: {}",
-                    file_name_str
-                );
-                remove_dir_all(&target_path)?;
-            }
+            let update = target_path.join(defs::UPDATE_FILE_NAME).exists();
+            if update {
+                if target_path.exists() {
+                    info!(
+                        "Removing existing folder in target directory: {}",
+                        file_name_str
+                    );
+                    remove_dir_all(&target_path)?;
+                }
 
-            info!("Moving {} to target directory", file_name_str);
-            rename(&source_path, &target_path)?;
+                info!("Moving {} to target directory", file_name_str);
+                rename(&source_path, &target_path)?;
+            }
         }
     }
     Ok(())
@@ -362,9 +368,10 @@ pub fn on_post_data_fs(superkey: Option<String>) -> Result<()> {
     let module_update_flag = Path::new(defs::WORKING_DIR).join(defs::UPDATE_FILE_NAME); // if update ,there will be renewed modules file
     assets::ensure_binaries().with_context(|| "binary missing")?;
 
-    ensure_dir_exists(defs::MODULE_UPDATE_TMP_DIR)?;
-
-    move_file(module_update_dir, module_dir)?;
+    if Path::new(defs::MODULE_UPDATE_TMP_DIR).exists() {
+        move_file(module_update_dir, module_dir)?;
+        fs::remove_dir_all(module_update_dir)?;
+    }
     let is_lite_mode_enabled = Path::new(defs::LITEMODE_FILE).exists();
 
     if safe_mode {
@@ -400,67 +407,71 @@ pub fn on_post_data_fs(superkey: Option<String>) -> Result<()> {
     if let Err(e) = module::exec_stage_script("post-fs-data", true) {
         warn!("exec post-fs-data scripts failed: {}", e);
     }
-
+    if let Err(e) = module::exec_stage_lua("post-fs-data",true, superkey.as_deref().unwrap_or("")) {
+        warn!("Failed to exec post-fs-data lua: {}", e);
+    }
     // load system.prop
     if let Err(e) = module::load_system_prop() {
         warn!("load system.prop failed: {}", e);
     }
 
-    if is_lite_mode_enabled {
-        info!("litemode runing skip mount state")
-    } else {
-        if utils::should_use_overlayfs()? {
-            // mount module systemlessly by overlay
-            let work_dir = get_work_dir();
-            let tmp_dir = PathBuf::from(work_dir.clone());
-            ensure_dir_exists(&tmp_dir)?;
-            mount(
-                defs::AP_OVERLAY_SOURCE,
-                &tmp_dir,
-                "tmpfs",
-                MountFlags::empty(),
-                "",
-            )
-            .context("mount tmp")?;
-            mount_change(&tmp_dir, MountPropagationFlags::PRIVATE).context("make tmp private")?;
-            let dir_names = vec!["vendor", "product", "system_ext", "odm", "oem", "system"];
-            let dir = fs::read_dir(module_dir)?;
-            for entry in dir.flatten() {
-                let module_path = entry.path();
-                let disabled = module_path.join(defs::DISABLE_FILE_NAME).exists();
-                if disabled {
-                    info!("module: {} is disabled, ignore!", module_path.display());
-                    continue;
-                }
-                if module_path.is_dir() {
-                    let module_name = module_path.file_name().unwrap().to_string_lossy();
-                    let module_dest = Path::new(&work_dir).join(module_name.as_ref());
+    if utils::should_use_overlayfs()? {
+        // mount module systemlessly by overlay
+        let work_dir = get_work_dir();
+        let tmp_dir = PathBuf::from(work_dir.clone());
+        ensure_dir_exists(&tmp_dir)?;
+        mount(
+            defs::AP_OVERLAY_SOURCE,
+            &tmp_dir,
+            "tmpfs",
+            MountFlags::empty(),
+            "",
+        )
+        .context("mount tmp")?;
+        mount_change(&tmp_dir, MountPropagationFlags::PRIVATE).context("make tmp private")?;
+        let dir_names = vec!["vendor", "product", "system_ext", "odm", "oem", "system"];
+        let dir = fs::read_dir(module_dir)?;
+        for entry in dir.flatten() {
+            let module_path = entry.path();
+            let disabled = module_path.join(defs::DISABLE_FILE_NAME).exists();
+            if disabled {
+                info!("module: {} is disabled, ignore!", module_path.display());
+                continue;
+            }
+            if module_path.is_dir() {
+                let module_name = module_path.file_name().unwrap().to_string_lossy();
+                let module_dest = Path::new(&work_dir).join(module_name.as_ref());
 
-                    for sub_dir in dir_names.iter() {
-                        let sub_dir_path = module_path.join(sub_dir);
-                        if sub_dir_path.exists() && sub_dir_path.is_dir() {
-                            let sub_dir_dest = module_dest.join(sub_dir);
-                            fs::create_dir_all(&sub_dir_dest)?;
+                for sub_dir in dir_names.iter() {
+                    let sub_dir_path = module_path.join(sub_dir);
+                    if sub_dir_path.exists() && sub_dir_path.is_dir() {
+                        let sub_dir_dest = module_dest.join(sub_dir);
+                        fs::create_dir_all(&sub_dir_dest)?;
 
-                            copy_dir_with_xattr(&sub_dir_path, &sub_dir_dest)?;
-                        }
+                        copy_dir_with_xattr(&sub_dir_path, &sub_dir_dest)?;
                     }
                 }
             }
-            if let Err(e) = mount_systemlessly(&get_work_dir(), false) {
-                warn!("do systemless mount failed: {}", e);
-            }
-            if let Err(e) = unmount(&tmp_dir, UnmountFlags::DETACH) {
-                log::error!("failed to unmount tmp {}", e);
-            }
-        } else {
+        }
+        if let Err(e) = mount_systemlessly(&get_work_dir(), false) {
+            warn!("do systemless mount failed: {}", e);
+        }
+        if let Err(e) = unmount(&tmp_dir, UnmountFlags::DETACH) {
+            log::error!("failed to unmount tmp {}", e);
+        }
+    } else {
+        if !is_lite_mode_enabled {
             if let Err(e) = systemless_bind_mount(module_dir) {
                 warn!("do systemless bind_mount failed: {}", e);
             }
+        } else {
+            info!("litemode runing skip magic mount");
         }
     }
+
     info!("remove update flag");
     let _ = fs::remove_file(module_update_flag);
+
     run_stage("post-mount", superkey, true);
 
     env::set_current_dir("/").with_context(|| "failed to chdir to /")?;
@@ -476,7 +487,7 @@ fn run_stage(stage: &str, superkey: Option<String>, block: bool) {
         return;
     }
 
-    if utils::is_safe_mode(superkey) {
+    if utils::is_safe_mode(superkey.clone()) {
         warn!("safe mode, skip {stage} scripts");
         if let Err(e) = module::disable_all_modules() {
             warn!("disable all modules failed: {}", e);
@@ -489,6 +500,9 @@ fn run_stage(stage: &str, superkey: Option<String>, block: bool) {
     }
     if let Err(e) = module::exec_stage_script(stage, block) {
         warn!("Failed to exec {stage} scripts: {e}");
+    }
+    if let Err(e) = module::exec_stage_lua(stage,block,superkey.as_deref().unwrap_or("")) {
+        warn!("Failed to exec {stage} lua: {e}");
     }
 }
 
@@ -524,9 +538,9 @@ fn run_uid_monitor() {
 pub fn on_boot_completed(superkey: Option<String>) -> Result<()> {
     info!("on_boot_completed triggered!");
 
-    run_uid_monitor();
     run_stage("boot-completed", superkey, false);
 
+    run_uid_monitor();
     Ok(())
 }
 
@@ -542,6 +556,20 @@ pub fn start_uid_listener() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
     let tx_clone = tx.clone();
     let mutex = Arc::new(Mutex::new(()));
+
+    {
+        let mutex_clone = mutex.clone();
+        thread::spawn(move || {
+            let mut signals = Signals::new(&[SIGTERM, SIGINT, SIGPWR]).unwrap();
+            for sig in signals.forever() {
+                log::warn!("[shutdown] Caught signal {sig}, refreshing package list...");
+                let skey = CStr::from_bytes_with_nul(b"su\0")
+                    .expect("[shutdown_listener] CStr::from_bytes_with_nul failed");
+                refresh_ap_package_list(&skey, &mutex_clone);
+                break; // 执行一次后退出线程
+            }
+        });
+    }
 
     let mut watcher = INotifyWatcher::new(
         move |ev: notify::Result<Event>| match ev {
